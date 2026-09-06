@@ -153,6 +153,13 @@ class MultiVideoDriver(VideoDriver):
         """
         if self._current is not None and self._current.active_context == self._next_hw_context:
             # If we're not switching to a whole new video driver...
+            if self._callback is not None:
+                # ...then hand it the core's latest request before it acts on it.
+                # A core that asks for the same graphics API twice can still have changed
+                # the version it wants or the callbacks it wants called,
+                # and the driver would otherwise act on the request before this one.
+                self._current.set_context(self._callback)
+
             self._current.reinit()  # ...then just let the driver reinit itself
         elif self._next_hw_context is not None:
             # If we're switching to another hardware rendering API...
