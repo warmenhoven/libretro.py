@@ -74,6 +74,30 @@ from ..driver import (
 
 _CONTEXTS = frozenset((HardwareContext.NONE, HardwareContext.OPENGL_CORE, HardwareContext.OPENGL))
 
+
+def _validate_gl_version(version: object, name: str) -> tuple[int, int] | None:
+    """
+    Check that ``version`` is :obj:`None` or a ``(major, minor)`` pair of non-negative ints.
+
+    :param version: The value to check.
+    :param name: The parameter name to use in error messages.
+    :return: ``version`` as a plain tuple, or :obj:`None`.
+    :raises TypeError: If ``version`` is neither :obj:`None` nor a pair of :class:`int`.
+    :raises ValueError: If either component is negative.
+    """
+    match version:
+        case None:
+            return None
+        case (int() as major, int() as minor):
+            if major < 0 or minor < 0:
+                raise ValueError(f"{name} components must be non-negative, got {version!r}")
+            return (major, minor)
+        case _:
+            raise TypeError(
+                f"Expected {name} to be a (major, minor) pair of ints or None, got {version!r}"
+            )
+
+
 _DEFAULT_VERT_FILENAME = "moderngl_vertex.glsl"
 _DEFAULT_FRAG_FILENAME = "moderngl_frag.glsl"
 
@@ -192,9 +216,10 @@ class ModernGlVideoDriver(VideoDriver):
         fragment_shader: str | None = None,
         varyings: Sequence[str] = ("transformedTexCoord",),
         window: str | None = None,
+        max_gl_version: tuple[int, int] | None = None,
+        gl_version: tuple[int, int] | None = None,
         # TODO: Add ability to configure the OpenGL message callback
         # TODO: Add ability to configure the OpenGL debug group
-        # TODO: Add ability to force an OpenGL version
     ):
         """
         Initialize the video driver.
@@ -202,14 +227,45 @@ class ModernGlVideoDriver(VideoDriver):
 
         This driver uses a basic shader program, but custom shaders can be provided.
 
-        :warning: The shaders are not compiled or linked until the OpenGL context is created,
+        .. warning:: The shaders are not compiled or linked until the OpenGL context is created,
             so GLSL errors won't be detected until then.
+
+        .. note:: The two version parameters only affect
+            :attr:`.HardwareContext.OPENGL_CORE` requests.
+            libretro picks the OpenGL profile from the context type,
+            not from the version fields:
+            :attr:`.HardwareContext.OPENGL` always means a 2.x-compatible context,
+            so the version fields are ignored.
 
         :param vertex_shader: The GLSL source of the vertex shader to use for rendering,
             or :obj:`None` to use the built-in default.
         :param fragment_shader: The GLSL source of the fragment shader to use for rendering,
             or :obj:`None` to use the built-in default.
         :param varyings: The names of the "varyings" (vertex value outputs) to use.
+        :param window: The :mod:`moderngl_window` backend to display frames in,
+            or :obj:`None` to render off-screen.
+        :param max_gl_version: The newest OpenGL core-profile version
+            this driver will agree to provide,
+            as a ``(major, minor)`` pair,
+            or :obj:`None` to accept whatever the core asks for.
+            A core that asks for a newer version
+            through ``RETRO_ENVIRONMENT_SET_HW_RENDER`` is told ``false``,
+            the same answer a frontend on older hardware would give.
+            Use it to test how a core copes when the frontend refuses its request.
+            This does not limit the version of the context that's actually created.
+        :param gl_version: The OpenGL core-profile version to actually create,
+            as a ``(major, minor)`` pair,
+            or :obj:`None` to create the version the core asked for.
+            The core's request is still accepted;
+            this only changes what it gets.
+            Use it to test how a core copes with a frontend
+            that agrees to a version and then delivers an older one,
+            which some frontends do.
+            Whether the driver honors an exact version is up to the platform's OpenGL implementation;
+            check :attr:`moderngl.Context.version_code` on :attr:`context` to be sure.
+        :raises TypeError: If ``max_gl_version`` or ``gl_version``
+            is neither :obj:`None` nor a pair of :class:`int`.
+        :raises ValueError: If either component of ``max_gl_version`` or ``gl_version`` is negative.
         """
         package_files = resources.files(modules[__name__].__package__)
         # TODO: Support passing SPIR-V shaders as bytes
@@ -236,6 +292,8 @@ class ModernGlVideoDriver(VideoDriver):
             raise TypeError("All elements of 'varyings' must be str")
 
         self._varyings = tuple(varyings)
+        self._max_gl_version = _validate_gl_version(max_gl_version, "max_gl_version")
+        self._gl_version = _validate_gl_version(gl_version, "gl_version")
         self._callback: retro_hw_render_callback | None = None
         self._pixel_format = PixelFormat.RGB1555
         self._system_av_info: retro_system_av_info | None = None
@@ -278,40 +336,55 @@ class ModernGlVideoDriver(VideoDriver):
 
             self._window_class = moderngl_window.get_local_window_cls(window_mode)
 
-    def __del__(self):
-        """Clean up allocated OpenGL resources and the underlying context."""
+    def __release_objects(self) -> None:
         if self._cpu_color:
-            del self._cpu_color
+            self._cpu_color.release()
+            self._cpu_color = None
 
         if self._hw_render_depth:
-            del self._hw_render_depth
+            self._hw_render_depth.release()
+            self._hw_render_depth = None
 
         if self._hw_render_color:
-            del self._hw_render_color
+            self._hw_render_color.release()
+            self._hw_render_color = None
 
         if self._hw_render_fbo:
-            del self._hw_render_fbo
+            self._hw_render_fbo.release()
+            self._hw_render_fbo = None
 
         if self._depth:
-            del self._depth
+            self._depth.release()
+            self._depth = None
 
         if self._color:
-            del self._color
+            self._color.release()
+            self._color = None
 
         if self._fbo:
-            del self._fbo
+            self._fbo.release()
+            self._fbo = None
 
         if self._vbo:
-            del self._vbo
+            self._vbo.release()
+            self._vbo = None
 
         if self._vao:
-            del self._vao
+            self._vao.release()
+            self._vao = None
+
+        self._mvp_uniform = None
 
         if self._shader_program:
-            del self._shader_program
+            self._shader_program.release()
+            self._shader_program = None
 
+    def __del__(self):
+        """Clean up allocated OpenGL resources and the underlying context."""
+        self.__release_objects()
         if self._context:
-            del self._context
+            self._context.release()
+            self._context = None
 
     @override
     def set_context(self, callback: retro_hw_render_callback) -> None:
@@ -327,7 +400,44 @@ class ModernGlVideoDriver(VideoDriver):
                 f"Unsupported hardware context: {context_type} (must be one of: {_CONTEXTS})"
             )
 
+        if context_type == HardwareContext.OPENGL_CORE and self._max_gl_version is not None:
+            requested = (callback.version_major, callback.version_minor)
+            if requested > self._max_gl_version:
+                raise UnsupportedContextError(
+                    f"Core requested an OpenGL {requested[0]}.{requested[1]} core context, "
+                    f"but this driver offers at most "
+                    f"{self._max_gl_version[0]}.{self._max_gl_version[1]}"
+                )
+
         self._callback = deepcopy(callback)
+
+    @property
+    def max_gl_version(self) -> tuple[int, int] | None:
+        """
+        The newest OpenGL core-profile version this driver will agree to provide,
+        or :obj:`None` if it accepts any.
+        """
+        return self._max_gl_version
+
+    @property
+    def gl_version(self) -> tuple[int, int] | None:
+        """
+        The OpenGL core-profile version this driver creates
+        regardless of what the core asked for,
+        or :obj:`None` if it creates the version the core asked for.
+        """
+        return self._gl_version
+
+    @property
+    def context(self) -> Context | None:
+        """
+        The :class:`moderngl.Context` this driver renders with,
+        or :obj:`None` if :meth:`reinit` hasn't created one yet.
+
+        Check its :attr:`~moderngl.Context.version_code`
+        to see which OpenGL version the platform actually provided.
+        """
+        return self._context
 
     @property
     @override
@@ -481,22 +591,15 @@ class ModernGlVideoDriver(VideoDriver):
                     self._callback.context_destroy()
                     _warn_unhandled_gl_errors()
 
+            # Destroy the OpenGL context and create a new one
+            self.__release_objects()
+
             if self._window:
                 self._window.destroy()
-                del self._window
+                self._window = None
 
             self._context.release()
-            del self._context
-
-            del self._hw_render_depth
-            del self._hw_render_color
-            del self._hw_render_fbo
-            del self._vao
-            del self._fbo
-            del self._shader_program
-            del self._vbo
-            del self._cpu_color
-            # Destroy the OpenGL context and create a new one
+            self._context = None
 
         geometry = self._system_av_info.geometry
 
@@ -528,7 +631,7 @@ class ModernGlVideoDriver(VideoDriver):
                 )
                 self._window = window_class(
                     title="libretro.py",
-                    gl_version=(self._callback.version_major, self._callback.version_minor),
+                    gl_version=self.__core_gl_version(),
                     size=(geometry.base_width, geometry.base_height),
                     resizable=False,
                     visible=True,
@@ -546,7 +649,8 @@ class ModernGlVideoDriver(VideoDriver):
                 assert self._callback is not None, (
                     "Should've been set by the core, or else this branch wouldn't have been taken"
                 )
-                ver = self._callback.version_major * 100 + self._callback.version_minor * 10
+                major, minor = self.__core_gl_version()
+                ver = major * 100 + minor * 10
                 self._context = create_context(require=ver, standalone=True, share=self._shared)
 
         self._context.clear_errors()
@@ -607,6 +711,19 @@ class ModernGlVideoDriver(VideoDriver):
                     ):
                         self._callback.context_reset()
                         _warn_unhandled_gl_errors()
+
+    def __core_gl_version(self) -> tuple[int, int]:
+        """
+        Return the core-profile version to create for the core's ``OPENGL_CORE`` request.
+
+        That's the forced :attr:`gl_version` if one was given,
+        else what the core asked for.
+        """
+        if self._gl_version is not None:
+            return self._gl_version
+
+        assert self._callback is not None, "Only meaningful once the core has requested a context"
+        return (self._callback.version_major, self._callback.version_minor)
 
     @property
     @override
@@ -880,9 +997,9 @@ class ModernGlVideoDriver(VideoDriver):
     def __init_fbo(self, width: int, height: int):
         assert self._context is not None
         with self._context.debug_scope("libretro.ModernGlVideoDriver.__init_fbo"):
-            del self._fbo
-            del self._color
-            del self._depth
+            self._fbo = None
+            self._color = None
+            self._depth = None
 
             size = (width, height)
 
@@ -946,7 +1063,10 @@ class ModernGlVideoDriver(VideoDriver):
                 # If we have a texture for CPU-rendered output, and it's the right size...
                 self._cpu_color.write(data)
             else:
-                del self._cpu_color
+                if self._cpu_color:
+                    self._cpu_color.release()
+
+                self._cpu_color = None
 
                 # Equivalent to glGenTextures, glBindTexture, glTexImage2D, and glTexParameteri
                 match self._pixel_format:

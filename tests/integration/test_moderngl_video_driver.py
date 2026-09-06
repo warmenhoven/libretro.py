@@ -256,6 +256,53 @@ def test_every_frame_comes_out_the_right_way_up(frames: list[_Frame]) -> None:
         )
 
 
+def test_a_cap_below_the_request_refuses_the_context(load_core: SampleCoreLoader) -> None:
+    """
+    A ``max_gl_version`` below what the core asks for makes ``SET_HW_RENDER`` fail.
+
+    ``hw_geometry_test`` asks for a 3.3 core context
+    and fails to load if the frontend won't provide it,
+    which is how the refusal shows up here.
+    """
+    core = load_core("custom", "hw_geometry_test")
+    with (
+        pytest.raises(RuntimeError, match="Failed to load game"),
+        Session(core, None, video=ModernGlVideoDriver(max_gl_version=(3, 2))),
+    ):
+        pass
+
+
+def test_a_cap_at_the_request_changes_nothing(load_core: SampleCoreLoader) -> None:
+    """A ``max_gl_version`` equal to the core's request lets it render as usual."""
+    frames = _capture(
+        load_core("custom", "hw_geometry_test"),
+        ModernGlVideoDriver(max_gl_version=(3, 3)),
+    )
+    assert {frame.kind for frame in frames} == {"hardware", "software"}
+
+
+def test_a_forced_version_is_what_the_core_gets(load_core: SampleCoreLoader) -> None:
+    """
+    ``gl_version`` decides the context that's created, not the core's request.
+
+    Whether the platform honors an exact version request is up to its OpenGL implementation
+    (some return the newest version they support instead),
+    so this skips rather than fails when it doesn't.
+    """
+    video = ModernGlVideoDriver(gl_version=(3, 2))
+    with Session(load_core("custom", "hw_geometry_test"), None, video=video) as session:
+        session.run()
+
+        assert video.context is not None
+        if video.context.version_code != 320:
+            pytest.skip(
+                f"This OpenGL implementation returned {video.context.version_code} "
+                "for a 3.2 request instead of honoring it exactly"
+            )
+
+        assert video.screenshot() is not None
+
+
 def test_hardware_frames_pass_through_the_shader_in_their_entirety(
     load_core: SampleCoreLoader,
 ) -> None:

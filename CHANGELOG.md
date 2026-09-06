@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > breaking changes may be introduced
 > at any time without warning.
 
+## [Unreleased]
+
+### Added
+
+- Added a `max_gl_version` parameter to `ModernGlVideoDriver`,
+  to allow writing tests for cores that exercise the case
+  where the requested OpenGL version is too new.
+- Added a `gl_version` parameter to `ModernGlVideoDriver`
+  that creates an OpenGL core context of that version
+  regardless of what the core asked for,
+  the way some frontends do.
+- Added `ModernGlVideoDriver.context` to expose the underlying `moderngl.Context`.
+
+### Fixed
+
+- Fixed `MultiVideoDriver` not passing a core's new `retro_hw_render_callback`
+  to the underlying driver when the graphics API didn't change.
+- Fixed `ModernGlVideoDriver` raising `AttributeError`
+  the second time it replaces its OpenGL context.
+
 ## [0.10.0] - 2026-09-02
 
 ### Added
